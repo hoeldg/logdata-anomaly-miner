@@ -20,7 +20,6 @@ from aminer import AminerConfig
 from aminer.AminerConfig import KEY_PERSISTENCE_PERIOD, DEFAULT_PERSISTENCE_PERIOD, DEBUG_LOG_NAME, CONFIG_KEY_LOG_LINE_PREFIX,\
     DEFAULT_LOG_LINE_PREFIX
 from aminer.AnalysisChild import AnalysisContext
-from aminer.events import EventSourceInterface
 from aminer.input.InputInterfaces import AtomHandlerInterface
 from aminer.util.TimeTriggeredComponentInterface import TimeTriggeredComponentInterface
 from aminer.util import PersistenceUtil
@@ -31,7 +30,7 @@ import statsmodels.api as sm
 from scipy.signal import savgol_filter
 
 
-class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface, EventSourceInterface):
+class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface):
     """This class is used for an arima time series analysis of the appearances of log lines to events."""
 
     def __init__(self, aminer_config, anomaly_event_handlers, event_type_detector, build_sum_over_values=False, num_division_time_step=10,
@@ -201,8 +200,7 @@ class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface, Ev
         self.time_history = [[] for _ in range(len(counts))]
         # Initialize the lists of the results
         self.result_list = [[1]*self.num_results_bt for _ in range(len(counts))]
-        # Minimal size of the time step
-        min_lag = max(int(0.2*self.event_type_detector.num_sections_waiting_time_for_TSA), 1)
+
         for event_index, data in enumerate(counts):
             if (self.path_list != [] and all(path not in self.event_type_detector.found_keys[event_index] for path in self.path_list)) or (
                     self.ignore_list != [] and any(ignore_path in self.event_type_detector.found_keys[event_index] for ignore_path in
@@ -210,14 +208,36 @@ class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface, Ev
                 time_step_list.append(-1)
             else:
                 # Apply the autocorrelation function to the data of the single event types.
-                corr = list(map(abs, sm.tsa.acf(data, nlags=len(data), fft=True)[min_lag:]))
+                corr = list(map(abs, sm.tsa.acf(data, nlags=len(data), fft=True)))
                 corr = np.array(corr)
                 # Apply the Savitzky-Golay-Filter to the list corr, to smooth the curve and get better results
                 corrfit = savgol_filter(corr, min(max(3, int(len(corr)/10)-int(int(len(corr)/10) % 2 == 0)), 101), 1)
 
+                # Find the index of the first local minimum and set the lag to this index.
+                min_lag = -1
+                for i in range(2, len(corrfit)-2):
+                    if corrfit[i-2] < corrfit[i-1] and corrfit[i-1] < corrfit[i] and\
+                            corrfit[i] < corrfit[i+1] and corrfit[i+1] < corrfit[i+2]:
+                        # Minimal size of the time step
+                        min_lag = i
+                        break
+
+                # Check if the event would have appeared at least ten times in every time window with the current min_lag.
+                if min_lag == -1 or 10 < sum(data) / len(data) * min_lag:
+                    # Minimal size of the time step
+                    min_lag = int(10 * len(data) / sum(data) + 1)
+
+                import matplotlib.pyplot as plt
+                plt.figure()
+                plt.plot(corrfit)
+                plt.plot([min_lag, min_lag], [0, self.acf_threshold])
+                plt.savefig('/tmp/TSACDF'+str(event_index), dpi=600)
+                plt.close()
+                print(min_lag)
+
                 # Find the highest peak and set the time-step as the index + lag
-                highest_peak_index = np.argmax(corrfit)
-                if corrfit[highest_peak_index] > self.acf_threshold:
+                highest_peak_index = np.argmax(corrfit[min_lag:])
+                if True or corrfit[highest_peak_index + min_lag] > self.acf_threshold:
                     time_step_list.append((highest_peak_index + min_lag) / self.num_division_time_step)
                 else:
                     time_step_list.append(-1)
@@ -303,6 +323,31 @@ class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface, Ev
                     self.prediction_history[event_index][1].append(count)
                     self.prediction_history[event_index][2].append(upper_limit)
                     self.time_history[event_index].append(current_time)
+
+                if len(self.time_history[event_index]) % 50 == 0:
+                    import matplotlib.pyplot as plt
+                    import matplotlib.dates as mdates
+                    import datetime as dt
+                    t = [dt.datetime.fromtimestamp(z) for z in self.time_history[event_index]]
+                    plt.figure()
+                    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m/%Y'))
+                    plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
+
+                    plt.plot(t, self.prediction_history[event_index][0], 'red')
+                    plt.plot(t, self.prediction_history[event_index][2], 'red')
+                    plt.plot(t, self.prediction_history[event_index][1], 'blue')
+                    
+                    for i in range(len(self.prediction_history[event_index][0])):
+                        if self.prediction_history[event_index][0][i] != self.prediction_history[event_index][2][i] and (
+                                self.prediction_history[event_index][0][i] > self.prediction_history[event_index][1][i] or
+                                self.prediction_history[event_index][1][i] > self.prediction_history[event_index][2][i]):
+                            plt.plot([t[i]], [self.prediction_history[event_index][1][i]], 'or', fillstyle='none', ms=8.0)
+
+                    plt.gcf().autofmt_xdate()
+
+                    plt.savefig('/tmp/TSAoutput'+str(event_index), dpi=600)
+                    plt.close()
+
                 # Shorten the lists if neccessary
                 if len(self.time_history[event_index]) > self.num_max_time_history:
                     self.prediction_history[event_index][0] = self.prediction_history[event_index][0][-self.num_min_time_history:]
@@ -399,6 +444,7 @@ class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface, Ev
 
     def print(self, message, log_atom, affected_path, confidence=None):
         """Print the message."""
+        AminerConfig.ENCODING = 'latin-1' # !!!
         if isinstance(affected_path, str):
             affected_path = [affected_path]
 
@@ -411,14 +457,14 @@ class TSAArimaDetector(AtomHandlerInterface, TimeTriggeredComponentInterface, Ev
             for x in list(log_atom.parser_match.get_match_dictionary().keys()):
                 tmp_str += '  ' + x + os.linesep
             tmp_str = tmp_str.lstrip('  ')
-            sorted_log_lines = [tmp_str + original_log_line_prefix + log_atom.raw_data.decode()]
+            sorted_log_lines = [tmp_str + original_log_line_prefix + log_atom.raw_data.decode(AminerConfig.ENCODING)]
             analysis_component = {'AffectedLogAtomPaths': list(log_atom.parser_match.get_match_dictionary().keys())}
         else:
             tmp_str = ''
             for x in affected_path:
                 tmp_str += '  ' + x + os.linesep
             tmp_str = tmp_str.lstrip('  ')
-            sorted_log_lines = [tmp_str + log_atom.raw_data.decode()]
+            sorted_log_lines = [tmp_str + log_atom.raw_data.decode(AminerConfig.ENCODING)]
             analysis_component = {'AffectedLogAtomPaths': affected_path}
 
         event_data = {'AnalysisComponent': analysis_component, 'TotalRecords': self.event_type_detector.total_records,

@@ -99,8 +99,48 @@ class EventTypeDetector(AtomHandlerInterface, TimeTriggeredComponentInterface):
                 self.etd_time_trigger[2].append(-1)
 
     def receive_atom(self, log_atom):
+        # Add the following lines at the start of the reveive_atom method of the ETD to create a figure if the stated path appears # !!!
+        if '/firstmatch0/End' in log_atom.parser_match.get_match_dictionary():
+            if 'TSAArimaDetector' in [module.__class__.__name__ for module in self.following_modules]:
+                tsa_index = next(j for j in range(len(self.following_modules)) if self.following_modules[j].__class__.__name__ == 'TSAArimaDetector')
+
+                import matplotlib.pyplot as plt
+                import matplotlib.dates as mdates
+                import datetime as dt
+                t = [dt.datetime.fromtimestamp(z) for z in self.following_modules[tsa_index].time_history[0]]
+                plt.figure()
+                plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m/%Y'))
+                plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
+
+                plt.plot(t, self.following_modules[tsa_index].prediction_history[0][0], 'red')
+                plt.plot(t, self.following_modules[tsa_index].prediction_history[0][2], 'red')
+                plt.plot(t, self.following_modules[tsa_index].prediction_history[0][1], 'blue')
+                
+                for i in range(len(self.following_modules[tsa_index].prediction_history[0][0])):
+                    if self.following_modules[tsa_index].prediction_history[0][0][i] != self.following_modules[tsa_index].prediction_history[0][2][i] and (
+                            self.following_modules[tsa_index].prediction_history[0][0][i] > self.following_modules[tsa_index].prediction_history[0][1][i] or
+                            self.following_modules[tsa_index].prediction_history[0][1][i] > self.following_modules[tsa_index].prediction_history[0][2][i]):
+                        plt.plot([t[i]], [self.following_modules[tsa_index].prediction_history[0][1][i]], 'or', fillstyle='none', ms=8.0)
+
+                plt.gcf().autofmt_xdate()
+
+                plt.savefig('/tmp/TSAoutput', dpi=1200)
+                end()
+
         """Receives an parsed atom and keeps track of the event types and the values of the variables of them."""
         self.log_total += 1
+        
+        valid_log_atom = False
+        if self.path_list:
+            for path in self.path_list:
+                if path in log_atom.parser_match.get_match_dictionary().keys():
+                    valid_log_atom = True
+                    break
+        if self.path_list and not valid_log_atom:
+            self.current_index = -1
+            return False
+        self.total_records += 1
+
         # Get the current time
         if self.track_time_for_TSA:
             if log_atom.atom_time is not None:
@@ -213,17 +253,6 @@ class EventTypeDetector(AtomHandlerInterface, TimeTriggeredComponentInterface):
                         self.etd_time_trigger[0][indices[i]] += self.etd_time_trigger[2][indices[i]]
                         self.num_eventlines_TSA_ref[self.etd_time_trigger[1][indices[i]]] = self.num_eventlines[self.etd_time_trigger[
                             1][indices[i]]]
-
-        valid_log_atom = False
-        if self.path_list:
-            for path in self.path_list:
-                if path in log_atom.parser_match.get_match_dictionary().keys():
-                    valid_log_atom = True
-                    break
-        if self.path_list and not valid_log_atom:
-            self.current_index = -1
-            return False
-        self.total_records += 1
 
         # Searches if the event type has previously appeared
         current_index = -1
